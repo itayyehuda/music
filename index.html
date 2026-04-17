@@ -608,6 +608,7 @@
   </div>
 </div>
 
+<script src="genius-lyrics.js"></script>
 <script>
 /* ════════════════════════════════════════════════════
    CONFIG & STATE
@@ -646,6 +647,9 @@ async function init() {
   // Pre-fill saved client ID
   const savedId = localStorage.getItem('hymne_client_id');
   if (savedId) document.getElementById('clientIdInput').value = savedId;
+
+  // Initialize Genius lyrics system
+  window.GeniusLyrics.init();
 
   // Handle OAuth callback
   const params = new URLSearchParams(window.location.search);
@@ -1052,92 +1056,29 @@ async function playSong(idx) {
   await fetchLyrics(t.name, artist);
 }
 
-/* ════════════════════════════════════════════════════
-   LYRICS  — lrclib (primary) → lyrist/Genius → lyrics.ovh
-════════════════════════════════════════════════════ */
-
-// Strip only noise tokens that are definitely NOT part of the real title/artist
-function cleanTitle(s) {
-  return s
-    .replace(/\s*\[.*?\]/g, '')                          // [brackets]
-    .replace(/\(?(feat\.?|ft\.?|with)\s[^)]+\)?/gi, '') // feat. / ft.
-    .replace(/\(?(official\s*(music\s*)?video|official\s*audio|official\s*lyric|lyrics?\s*video|hd|4k)\)?/gi, '')
-    .replace(/\(?(remaster(ed)?(\s*\d{4})?|radio\s*edit|single\s*version)\)?/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function cleanArtist(s) {
-  // For artists, only strip feat. — never strip dashes (Per Vers, Foo-Bar, etc.)
-  return s.replace(/\(?(feat\.?|ft\.?|with)\s[^)]+\)?/gi, '').replace(/\s+/g, ' ').trim();
-}
-
-/* ── lrclib.net — free, no key, solid database ── */
-async function fetchLrclib(track, artist) {
-  const p = new URLSearchParams({ track_name: track, artist_name: artist });
-  const r = await fetch('https://lrclib.net/api/search?' + p, { signal: AbortSignal.timeout(6000) });
-  if (!r.ok) throw new Error('lrclib http ' + r.status);
-  const results = await r.json();
-  // Pick best result: prefer plain lyrics, check artist/title similarity
-  for (const item of results) {
-    if (item.plainLyrics && item.plainLyrics.trim().length > 30) {
-      return item.plainLyrics.trim();
-    }
-  }
-  throw new Error('lrclib: no lyrics in results');
-}
-
-/* ── lyrist.vercel.app — scrapes Genius, free, no key ── */
-async function fetchLyrist(track, artist) {
-  const url = `https://lyrist.vercel.app/api/${encodeURIComponent(track)}/${encodeURIComponent(artist)}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  if (!r.ok) throw new Error('lyrist http ' + r.status);
-  const d = await r.json();
-  if (!d.lyrics || d.lyrics.trim().length < 30) throw new Error('lyrist: empty');
-  return d.lyrics.trim();
-}
-
-/* ── lyrics.ovh — fallback ── */
-async function fetchOvh(artist, track) {
-  const url = `https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(track)}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(6000) });
-  if (!r.ok) throw new Error('ovh http ' + r.status);
-  const d = await r.json();
-  if (!d.lyrics || d.lyrics.trim().length < 30) throw new Error('ovh: empty');
-  return d.lyrics.trim();
-}
-
 async function fetchLyrics(trackName, artistName) {
-  const ct = cleanTitle(trackName);
-  const ca = cleanArtist(artistName);
-
-  // Ordered list of attempts: [fetchFn, ...args]
-  // We try clean versions first, then raw, giving each API a fair shot
-  const attempts = [
-    () => fetchLrclib(ct, ca),
-    () => fetchLrclib(trackName, artistName),
-    () => fetchLyrist(ct, ca),
-    () => fetchLyrist(trackName, artistName),
-    () => fetchOvh(ca, ct),
-    () => fetchOvh(artistName, trackName),
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const lyrics = await attempt();
-      if (lyrics) return finalizeLyrics(lyrics);
-    } catch(_) {}
+  try {
+    const result = await window.GeniusLyrics.fetch(trackName, artistName);
+    
+    if (!result) {
+      throw new Error('No lyrics found');
+    }
+    
+    // Store lyrics data for display
+    curLyrics = result.lyrics;
+    curLang = result.language || 'en';
+    
+    // Process lyrics with translation
+    await finalizeLyrics(result.lyrics);
+    
+  } catch (error) {
+    console.error('Lyrics fetch error:', error);
+    setLyricContent(`
+      <div class="l-empty">
+        <div class="le-big">Lyrics Error</div>
+        <div class="le-sm">${esc(error.message)}</div>
+      </div>`);
   }
-
-  setLyricContent(`
-    <div class="l-empty">
-      <div class="le-big">No lyrics found</div>
-      <div class="le-sm">
-        Couldn't find lyrics for "<b>${esc(trackName)}</b>" by <b>${esc(artistName)}</b>
-        across lrclib, Genius, and lyrics.ovh.<br>
-        This is most common for very new releases or regional tracks.
-      </div>
-    </div>`);
 }
 
 async function finalizeLyrics(lyrics) {
@@ -1156,48 +1097,10 @@ const LANG_NAMES = {
   is:'Icelandic',fo:'Faroese',ja:'Japanese',ko:'Korean',zh:'Chinese',ar:'Arabic'
 };
 
-function detectLang(text) {
-  const t = text.toLowerCase();
-  const cnt = re => (text.match(re)||[]).length;
-
-  // Script-level detection
-  if (cnt(/[\u0400-\u04FF]/g)>8) return 'ru';
-  if (cnt(/[\u3040-\u30FF]/g)>5) return 'ja';
-  if (cnt(/[\uAC00-\uD7A3]/g)>5) return 'ko';
-  if (cnt(/[\u4E00-\u9FFF]/g)>8) return 'zh';
-  if (cnt(/[\u0600-\u06FF]/g)>8) return 'ar';
-
-  const frC = cnt(/[àâçéèêëîïôùûœÀÂÇÉÈÊËÎÏÔÙÛŒ]/g);
-  const esC = cnt(/[áéíóúüñÁÉÍÓÚÜÑ¿¡]/g);
-  const ptC = cnt(/[ãõÃÕ]/g);
-  const daC = cnt(/[æøÆØ]/g);
-  const aaC = cnt(/å/gi);
-  const deC = cnt(/[äöüßÄÖÜ]/g);
-
-  if (frC > 7) return 'fr';
-  if (esC > 7) return 'es';
-  if (ptC > 4 && esC < 5) return 'pt';
-
-  const daW = (t.match(/\b(og|ikke|jeg|det|hvad|hvem|til|han|hun|med|er|af|fra|kan|vil|men|ved|her|var|dem|bare|nu|jo|nok|hej|én|én|at|på|så|som|sig|alt|sin|sit|de|de|du)\b/g)||[]).length;
-  const svW = (t.match(/\b(och|inte|jag|det|vad|vem|till|han|hon|med|är|från|kan|vill|men|vid|här|var|dem|bara|nu|jo|nog|hej|att|på|så|som|sig|allt|sin|sitt|de|du)\b/g)||[]).length;
-  const noW = (t.match(/\b(og|ikke|jeg|det|hva|hvem|til|han|hun|med|er|fra|kan|vil|men|ved|her|var|seg|bare|jo|på|så|som|sitt|du)\b/g)||[]).length;
-  const deW = (t.match(/\b(ich|du|er|sie|es|wir|ihr|und|nicht|das|ist|ein|eine|mit|auf|für|von|zu|dem|der|die|aber|auch|dass|wie|wenn|so|aus|an|im|am)\b/g)||[]).length;
-  const nlW = (t.match(/\b(de|het|een|van|in|te|is|niet|voor|op|met|dat|maar|ik|je|jij|hij|zij|ze|we|ook|meer|aan|door|bij)\b/g)||[]).length;
-  const itW = (t.match(/\b(il|la|le|gli|lo|un|una|è|sono|non|che|per|con|del|della|questo|questa|ma|ho|hai|ha|mi|ti|si|ci|vi)\b/g)||[]).length;
-
-  if (daC >= 2 || aaC >= 2) {
-    if (daW > svW) return 'da';
-    if (svW > daW) return 'sv';
-    if (aaC > 1) return 'da'; // å is shared but more common in Danish
-    return 'da';
-  }
-  if (daW >= 4 && daW > svW && daW > noW) return 'da';
-  if (svW >= 4 && svW > daW) return 'sv';
-  if (noW >= 4 && noW > daW) return 'no';
-  if (deC > 4 || deW >= 5) return 'de';
-  if (nlW >= 6) return 'nl';
-  if (itW >= 5) return 'it';
-  return null; // English
+function detectLang(lyrics) {
+  // Language is now detected from Genius API response in fetchLyrics
+  // This function is kept for compatibility but no longer needs to parse text
+  return curLang || null;
 }
 
 /* ════════════════════════════════════════════════════
@@ -1260,7 +1163,20 @@ async function translateText(text, from, to) {
 async function translateChunk(text, from, to) {
   const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${from}|${to}`);
   const d = await r.json();
-  if (d.responseStatus===200||d.responseStatus==='200') return d.responseData.translatedText;
+  if (d.responseStatus===200||d.responseStatus==='200') {
+      // Handle HTML entities in translation response
+      let translatedText = d.responseData.translatedText;
+      // Decode HTML entities
+      translatedText = translatedText.replace(/&#10;/g, '\n')
+                              .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)))
+                              .replace(/&amp;/g, '&')
+                              .replace(/&lt;/g, '<')
+                              .replace(/&gt;/g, '>')
+                              .replace(/&quot;/g, '"')
+                              .replace(/&#39;/g, "'")
+                              .replace(/&apos;/g, "'");
+      return translatedText;
+    }
   throw new Error(d.responseDetails || 'Translation error');
 }
 
@@ -1305,7 +1221,7 @@ function setLyricContent(html) {
 /* ════════════════════════════════════════════════════
    UTILS
 ════════════════════════════════════════════════════ */
-function esc(s=''){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function esc(s=''){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/&#(\d+);/g, (match, num) => String.fromCharCode(parseInt(num, 16))).replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => String.fromCharCode(parseInt(hex, 16)));}
 function msToTime(ms){if(!ms)return'0:00';const s=Math.round(ms/1000);return`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
 function skelHTML(n){return Array(n).fill(0).map(()=>`<div class="skel-item"><div class="sk sk-art"></div><div class="sk-lines"><div class="sk sk-l" style="width:${70+Math.random()*25|0}%"></div><div class="sk sk-l" style="width:${40+Math.random()*28|0}%"></div></div></div>`).join('');}
 function toast(msg,ok=false){const el=document.getElementById('toast');el.textContent=msg;el.className='toast'+(ok?' ok':'');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.add('hidden'),4500);}
