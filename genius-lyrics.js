@@ -90,7 +90,6 @@ async function getGeniusLyrics(songId) {
   }
   
   const html = await pageResponse.text();
-  console.log('HTML length:', html.length);
   const lyrics = extractLyricsFromHTML(html);
   console.log('Extracted lyrics length:', lyrics ? lyrics.length : 0);
   
@@ -251,7 +250,6 @@ async function fetchLyrics(trackName, artistName) {
     
     // Get lyrics for the best match
     const lyricsData = await getGeniusLyrics(bestResult.id);
-    console.log(lyricsData);
     
     if (!lyricsData || !lyricsData.lyrics) {
       throw new Error('No lyrics available for this song on Genius');
